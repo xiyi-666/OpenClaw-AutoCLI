@@ -8,7 +8,7 @@
 [![Node](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![Docker](https://img.shields.io/badge/Docker-ready-blue)](docker-compose.yml)
 
-** [中文](#chinese) | [English](#english) **
+**[中文](#chinese) | [English](#english)**
 
 </div>
 
