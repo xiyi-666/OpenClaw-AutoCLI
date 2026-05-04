@@ -15,7 +15,7 @@
 ---
 
 <a name="english"></a>
-## 🇬🇧 English
+## English
 
 ### Overview
 
@@ -152,7 +152,7 @@ curl -X DELETE http://127.0.0.1:8700/tasks/<id>
 
 ---
 <a name="chinese"></a>
-## 🇨🇳 中文
+## Chinese
 
 ### 项目简介
 
