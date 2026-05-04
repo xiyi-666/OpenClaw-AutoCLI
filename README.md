@@ -152,7 +152,7 @@ curl -X DELETE http://127.0.0.1:8700/tasks/<id>
 
 ---
 <a name="chinese"></a>
-## Chinese
+## 中文
 
 ### 项目简介
 
