@@ -8,147 +8,9 @@
 [![Node](https://img.shields.io/badge/Node.js-18%2B-green)](https://nodejs.org)
 [![Docker](https://img.shields.io/badge/Docker-ready-blue)](docker-compose.yml)
 
-**[English](#english) | [中文](#chinese)**
+** [中文](#chinese) | [English](#english) **
 
 </div>
-
----
-
-<a name="english"></a>
-## English
-
-### Overview
-
-`openclaw-cli-auto` provides a backend HTTP + WebSocket service that:
-
-- Accepts task/session creation requests from external clients (e.g. OpenClaw)
-- Spawns and manages local AI CLI processes (Claude, Gemini, Codex, OpenCode)
-- Tracks task lifecycle, handles interrupts, and auto-recycles stale tasks
-- Persists session IDs so conversations can be **resumed** after restart
-- Serves a React frontend dashboard for monitoring and control
-
-### Architecture
-
-```
-External Client (OpenClaw, etc.)
-        │  REST / WebSocket
-        ▼
-┌─────────────────────────────┐
-│      Backend  :8700/:8701   │
-│  TaskOrchestrator           │
-│  ├─ ClaudeJsonClient        │
-│  ├─ GeminiPromptClient      │
-│  ├─ CodexStructuredClient   │
-│  └─ OpenCodeRunClient       │
-└─────────────────────────────┘
-        │
-        ▼
-   Frontend  :5120 (nginx)
-```
-
-### Task Lifecycle
-
-```
-running ──► completed ──── 15 min ──► terminated (fields trimmed) ──── 5 h ──► removed
-running ──► failed    ──── 15 min ──► terminated                  ──── 5 h ──► removed
-running ──► waiting_input ── 8 h ──► terminated                   ──── 5 h ──► removed
-any finished state ──── DELETE /tasks/:id ──► removed immediately
-```
-
-### Session Resume
-
-Session mappings are persisted to `.workspaces/` so conversations survive restarts:
-
-| CLI | Resume flag |
-|-----|-------------|
-| claude | `--resume <sessionId>` |
-| gemini | `--resume <sessionId>` |
-| opencode | `--session <sessionId>` |
-| codex | `thread/resume` RPC |
-
-### Quick Start
-
-#### Option A — Host machine (reuse installed CLIs)
-
-```bash
-cp .env.example .env
-# Fill in OPENCLAW_GATEWAY_TOKEN
-docker compose -f docker-compose.host.yml up -d
-```
-
-#### Option B — Fresh environment (install CLIs inside container + auto-update)
-
-```bash
-cp .env.example .env
-# Fill in OPENCLAW_GATEWAY_TOKEN
-docker compose -f docker-compose.full.yml up -d
-# First run: authenticate CLIs inside the container
-docker compose -f docker-compose.full.yml exec backend sh
-# claude auth login / gemini auth login ...
-```
-
-#### Local dev (no Docker)
-
-```bash
-cp .env.example .env
-npm install
-npm run dev:backend   # backend on :8700/:8701
-npm run dev:frontend  # frontend on :5120
-```
-
-### API Reference
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/tasks` | Create & submit a task |
-| `GET` | `/tasks` | List all tasks |
-| `GET` | `/tasks/:id` | Get task detail |
-| `POST` | `/tasks/:id/input` | Send follow-up message |
-| `POST` | `/tasks/:id/terminate` | Terminate a task |
-| `DELETE` | `/tasks/:id` | Remove finished task from memory |
-| `GET` | `/tasks/stats` | Task statistics |
-| `POST` | `/sessions` | Create a session |
-| `GET` | `/sessions/:id/history` | Session conversation history |
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENCLAW_CLIENT_MODE` | `acpx` | `openclaw` or `acpx` |
-| `OPENCLAW_BASE_URL` | `http://127.0.0.1:18789` | Gateway URL |
-| `OPENCLAW_GATEWAY_TOKEN` | — | Gateway auth token |
-| `AUTOCLI_BASE_URL` | `http://127.0.0.1:8700` | Backend URL for autocli skill |
-| `OPENCLAW_TASK_RETENTION_MS` | `900000` | completed/failed retention (15 min) |
-| `OPENCLAW_TERMINATED_RETENTION_MS` | `18000000` | terminated retention (5 h) |
-| `OPENCLAW_INTERRUPT_TTL_MS` | `28800000` | waiting_input timeout (8 h) |
-
-### autocli Skill
-
-The `skills/autocli/` package lets OpenClaw AI operate the backend directly:
-
-```bash
-# Create a task
-autocli-create --prompt "your prompt" --session-type claude
-
-# Check status
-autocli-status --id <task-id>
-
-# Continue conversation
-curl -X POST http://127.0.0.1:8700/tasks/<id>/input \
-  -H 'content-type: application/json' \
-  -d '{"message":"follow-up"}'
-
-# Dismiss finished task
-curl -X DELETE http://127.0.0.1:8700/tasks/<id>
-```
-
-### Roadmap
-
-- [ ] **Frontend UI improvements** — better task detail view, log streaming, dark/light theme
-- [ ] **CLI token usage tracking** — parse input/output tokens from each CLI's JSON output
-- [ ] **CLI model switching** — per-task model selection (e.g. `claude-opus-4`, `gemini-2.5-pro`)
-- [ ] **Task list configuration** — custom columns, sorting, persistent filter preferences
-- [ ] **Task queue priority** — priority levels for task scheduling (high / normal / low)
 
 ---
 <a name="chinese"></a>
@@ -288,6 +150,144 @@ curl -X DELETE http://127.0.0.1:8700/tasks/<id>
 - [ ] **任务队列优先级** — 支持高/普通/低优先级调度
 
 ---
+
+---
+
+<a name="english"></a>
+## English
+
+### Overview
+
+`openclaw-cli-auto` provides a backend HTTP + WebSocket service that:
+
+- Accepts task/session creation requests from external clients (e.g. OpenClaw)
+- Spawns and manages local AI CLI processes (Claude, Gemini, Codex, OpenCode)
+- Tracks task lifecycle, handles interrupts, and auto-recycles stale tasks
+- Persists session IDs so conversations can be **resumed** after restart
+- Serves a React frontend dashboard for monitoring and control
+
+### Architecture
+
+```
+External Client (OpenClaw, etc.)
+        │  REST / WebSocket
+        ▼
+┌─────────────────────────────┐
+│      Backend  :8700/:8701   │
+│  TaskOrchestrator           │
+│  ├─ ClaudeJsonClient        │
+│  ├─ GeminiPromptClient      │
+│  ├─ CodexStructuredClient   │
+│  └─ OpenCodeRunClient       │
+└─────────────────────────────┘
+        │
+        ▼
+   Frontend  :5120 (nginx)
+```
+
+### Task Lifecycle
+
+```
+running ──► completed ──── 15 min ──► terminated (fields trimmed) ──── 5 h ──► removed
+running ──► failed    ──── 15 min ──► terminated                  ──── 5 h ──► removed
+running ──► waiting_input ── 8 h ──► terminated                   ──── 5 h ──► removed
+any finished state ──── DELETE /tasks/:id ──► removed immediately
+```
+
+### Session Resume
+
+Session mappings are persisted to `.workspaces/` so conversations survive restarts:
+
+| CLI | Resume flag |
+|-----|-------------|
+| claude | `--resume <sessionId>` |
+| gemini | `--resume <sessionId>` |
+| opencode | `--session <sessionId>` |
+| codex | `thread/resume` RPC |
+
+### Quick Start
+
+#### Option A — Host machine (reuse installed CLIs)
+
+```bash
+cp .env.example .env
+# Fill in OPENCLAW_GATEWAY_TOKEN
+docker compose -f docker-compose.host.yml up -d
+```
+
+#### Option B — Fresh environment (install CLIs inside container + auto-update)
+
+```bash
+cp .env.example .env
+# Fill in OPENCLAW_GATEWAY_TOKEN
+docker compose -f docker-compose.full.yml up -d
+# First run: authenticate CLIs inside the container
+docker compose -f docker-compose.full.yml exec backend sh
+# claude auth login / gemini auth login ...
+```
+
+#### Local dev (no Docker)
+
+```bash
+cp .env.example .env
+npm install
+npm run dev:backend   # backend on :8700/:8701
+npm run dev:frontend  # frontend on :5120
+```
+
+### API Reference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/tasks` | Create & submit a task |
+| `GET` | `/tasks` | List all tasks |
+| `GET` | `/tasks/:id` | Get task detail |
+| `POST` | `/tasks/:id/input` | Send follow-up message |
+| `POST` | `/tasks/:id/terminate` | Terminate a task |
+| `DELETE` | `/tasks/:id` | Remove finished task from memory |
+| `GET` | `/tasks/stats` | Task statistics |
+| `POST` | `/sessions` | Create a session |
+| `GET` | `/sessions/:id/history` | Session conversation history |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENCLAW_CLIENT_MODE` | `acpx` | `openclaw` or `acpx` |
+| `OPENCLAW_BASE_URL` | `http://127.0.0.1:18789` | Gateway URL |
+| `OPENCLAW_GATEWAY_TOKEN` | — | Gateway auth token |
+| `AUTOCLI_BASE_URL` | `http://127.0.0.1:8700` | Backend URL for autocli skill |
+| `OPENCLAW_TASK_RETENTION_MS` | `900000` | completed/failed retention (15 min) |
+| `OPENCLAW_TERMINATED_RETENTION_MS` | `18000000` | terminated retention (5 h) |
+| `OPENCLAW_INTERRUPT_TTL_MS` | `28800000` | waiting_input timeout (8 h) |
+
+### autocli Skill
+
+The `skills/autocli/` package lets OpenClaw AI operate the backend directly:
+
+```bash
+# Create a task
+autocli-create --prompt "your prompt" --session-type claude
+
+# Check status
+autocli-status --id <task-id>
+
+# Continue conversation
+curl -X POST http://127.0.0.1:8700/tasks/<id>/input \
+  -H 'content-type: application/json' \
+  -d '{"message":"follow-up"}'
+
+# Dismiss finished task
+curl -X DELETE http://127.0.0.1:8700/tasks/<id>
+```
+
+### Roadmap
+
+- [ ] **Frontend UI improvements** — better task detail view, log streaming, dark/light theme
+- [ ] **CLI token usage tracking** — parse input/output tokens from each CLI's JSON output
+- [ ] **CLI model switching** — per-task model selection (e.g. `claude-opus-4`, `gemini-2.5-pro`)
+- [ ] **Task list configuration** — custom columns, sorting, persistent filter preferences
+- [ ] **Task queue priority** — priority levels for task scheduling (high / normal / low)
 
 <div align="center">
 <sub>MIT License</sub>
