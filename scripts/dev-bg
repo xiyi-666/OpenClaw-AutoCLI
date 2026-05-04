@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR="${OPENCLAW_LOG_DIR:-$ROOT_DIR/.run/logs}"
+PID_DIR="${OPENCLAW_PID_DIR:-$ROOT_DIR/.run/pids}"
+BACKEND_LOG="$LOG_DIR/backend.log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
+BACKEND_PID_FILE="$PID_DIR/backend.pid"
+FRONTEND_PID_FILE="$PID_DIR/frontend.pid"
+BACKEND_CMD="${OPENCLAW_BACKEND_START_CMD:-npm --workspace @openclaw/backend run dev}"
+FRONTEND_CMD="${OPENCLAW_FRONTEND_START_CMD:-npm --workspace @openclaw/frontend run dev}"
+
+mkdir -p "$LOG_DIR" "$PID_DIR"
+
+start_service() {
+  local name="$1"
+  local command="$2"
+  local log_file="$3"
+  local pid_file="$4"
+
+  if [[ -f "$pid_file" ]]; then
+    local existing_pid
+    existing_pid="$(cat "$pid_file" 2>/dev/null || true)"
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "$name already running (pid=$existing_pid)"
+      return 0
+    fi
+  fi
+
+  nohup bash -lc "$command" >>"$log_file" 2>&1 &
+  local pid=$!
+  printf '%s\n' "$pid" > "$pid_file"
+  echo "$name started (pid=$pid, log=$log_file)"
+}
+
+start_service "backend" "$BACKEND_CMD" "$BACKEND_LOG" "$BACKEND_PID_FILE"
+start_service "frontend" "$FRONTEND_CMD" "$FRONTEND_LOG" "$FRONTEND_PID_FILE"
+
+echo "background startup complete"

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PID_DIR="${OPENCLAW_PID_DIR:-$ROOT_DIR/.run/pids}"
+BACKEND_PID_FILE="$PID_DIR/backend.pid"
+FRONTEND_PID_FILE="$PID_DIR/frontend.pid"
+
+stop_service() {
+  local name="$1"
+  local pid_file="$2"
+
+  if [[ ! -f "$pid_file" ]]; then
+    echo "$name not running"
+    return 0
+  fi
+
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    echo "$name stopped (pid=$pid)"
+  else
+    echo "$name not running"
+  fi
+  rm -f "$pid_file"
+}
+
+stop_service "backend" "$BACKEND_PID_FILE"
+stop_service "frontend" "$FRONTEND_PID_FILE"

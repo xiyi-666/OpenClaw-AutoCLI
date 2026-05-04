@@ -1,0 +1,24 @@
+# docker-compose.host.yml — 宿主机版本（复用宿主机已安装的 CLI）
+services:
+  backend:
+    build: ./packages/backend
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - workspaces:/app/.workspaces
+      - ${NVM_BIN:-/usr/local/bin}:/host-nvm-bin:ro
+      - ${HOME}/.claude:/root/.claude
+      - ${HOME}/.config/gemini:/root/.config/gemini
+      - ${HOME}/.opencode:/root/.opencode
+    environment:
+      - PATH=/host-nvm-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    restart: unless-stopped
+
+  frontend:
+    build: ./packages/frontend
+    network_mode: host
+    restart: unless-stopped
+
+volumes:
+  workspaces:

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${AUTOCLI_BASE_URL:-http://127.0.0.1:8700}"
+TIMEOUT="${AUTOCLI_TIMEOUT:-15}"
+STATUS=""
+LIMIT=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base-url) BASE_URL="$2"; shift 2 ;;
+    --status) STATUS="$2"; shift 2 ;;
+    --limit) LIMIT="$2"; shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+RAW_JSON="$(curl -sS --max-time "$TIMEOUT" "$BASE_URL/tasks")"
+
+node - "$RAW_JSON" "$STATUS" "$LIMIT" <<'EOF'
+const raw = process.argv[2];
+const status = (process.argv[3] || '').trim();
+const limitRaw = (process.argv[4] || '').trim();
+
+let data;
+try {
+  data = JSON.parse(raw);
+} catch {
+  console.log(raw);
+  process.exit(0);
+}
+
+let tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+if (status) tasks = tasks.filter((t) => t?.status === status);
+
+const limit = Number(limitRaw);
+if (Number.isFinite(limit) && limit > 0) tasks = tasks.slice(0, limit);
+
+console.log(JSON.stringify({ ok: true, tasks, total: tasks.length }, null, 2));
+EOF

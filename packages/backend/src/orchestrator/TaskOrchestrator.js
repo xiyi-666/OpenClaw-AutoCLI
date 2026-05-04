@@ -52,6 +52,8 @@ const DEFAULT_SWEEP_INTERVAL_MS = Number(process.env.OPENCLAW_SWEEP_INTERVAL_MS 
 const DEFAULT_OUTPUT_BUFFER_MAX_BYTES = Number(process.env.OPENCLAW_OUTPUT_BUFFER_MAX_BYTES || 64 * 1024);
 const DEFAULT_UPSTREAM_POLL_INTERVAL_MS = Number(process.env.OPENCLAW_UPSTREAM_POLL_INTERVAL_MS || 2000);
 const DEFAULT_INBOUND_BRIDGE_POLL_INTERVAL_MS = Number(process.env.OPENCLAW_INBOUND_BRIDGE_POLL_INTERVAL_MS || 1500);
+const DEFAULT_INTERRUPT_TTL_MS = Number(process.env.OPENCLAW_INTERRUPT_TTL_MS || 8 * 60 * 60 * 1000);
+const DEFAULT_TERMINATED_RETENTION_MS = Number(process.env.OPENCLAW_TERMINATED_RETENTION_MS || 5 * 60 * 60 * 1000);
 
 export class TaskOrchestrator extends EventEmitter {
   constructor({
@@ -60,6 +62,7 @@ export class TaskOrchestrator extends EventEmitter {
     probe,
     codexClient,
     claudeClient,
+    openCodeClient,
     gatewaySubscriber,
     logger = console,
     maxTasks = DEFAULT_MAX_TASKS,
@@ -71,6 +74,8 @@ export class TaskOrchestrator extends EventEmitter {
     upstreamPollIntervalMs = DEFAULT_UPSTREAM_POLL_INTERVAL_MS,
     inboundBridgePollIntervalMs = DEFAULT_INBOUND_BRIDGE_POLL_INTERVAL_MS,
     overflowPolicy = process.env.OPENCLAW_OVERFLOW_POLICY || 'reject',
+    interruptTtlMs = DEFAULT_INTERRUPT_TTL_MS,
+    terminatedRetentionMs = DEFAULT_TERMINATED_RETENTION_MS,
   } = {}) {
     super();
     this.client = client;
@@ -78,6 +83,7 @@ export class TaskOrchestrator extends EventEmitter {
     this.probe = probe;
     this.codexClient = codexClient;
     this.claudeClient = claudeClient;
+    this.openCodeClient = openCodeClient;
     this.gatewaySubscriber = gatewaySubscriber;
     this.logger = logger;
     this.tasks = new Map();
@@ -98,6 +104,8 @@ export class TaskOrchestrator extends EventEmitter {
     this.upstreamPollIntervalMs = Number.isFinite(upstreamPollIntervalMs) ? Math.max(500, upstreamPollIntervalMs) : DEFAULT_UPSTREAM_POLL_INTERVAL_MS;
     this.inboundBridgePollIntervalMs = Number.isFinite(inboundBridgePollIntervalMs) ? Math.max(500, inboundBridgePollIntervalMs) : DEFAULT_INBOUND_BRIDGE_POLL_INTERVAL_MS;
     this.overflowPolicy = overflowPolicy === 'evict_oldest' ? 'evict_oldest' : 'reject';
+    this.interruptTtlMs = Number.isFinite(interruptTtlMs) ? Math.max(1, interruptTtlMs) : DEFAULT_INTERRUPT_TTL_MS;
+    this.terminatedRetentionMs = Number.isFinite(terminatedRetentionMs) ? Math.max(1, terminatedRetentionMs) : DEFAULT_TERMINATED_RETENTION_MS;
     this.isPollingUpstream = false;
     this.isPollingInboundBridge = false;
     this.sweepTimer = setInterval(() => {
@@ -269,6 +277,8 @@ export class TaskOrchestrator extends EventEmitter {
       ...task,
       runId: task.runId || existing?.runId || `run:${task.id}`,
       sessionKey: task.sessionKey || task.metadata?.sessionKey || existing?.sessionKey || task.id,
+      controlState: task.controlState || existing?.controlState || 'running',
+      attempt: Number(task.attempt || existing?.attempt || 1),
       status: task.status || existing?.status || 'queued',
       createdAt: existing?.createdAt || now,
       updatedAt: now,
@@ -287,7 +297,7 @@ export class TaskOrchestrator extends EventEmitter {
     if (!task) throw new Error(`Unknown task: ${taskId}`);
 
     const sessionType = String(task.sessionType || '').toLowerCase();
-    const useLocalCli = sessionType === 'codex' || sessionType === 'claude' || sessionType === 'gemini';
+    const useLocalCli = sessionType === 'codex' || sessionType === 'claude' || sessionType === 'gemini' || sessionType === 'opencode';
     this.#assertSessionAvailability(task);
 
     task.status = 'submitted';
@@ -337,6 +347,9 @@ export class TaskOrchestrator extends EventEmitter {
     }
     if (cliType === 'claude' && this.#shouldUseClaudeJson() && this.claudeClient) {
       return this.#submitClaudeJsonTask(task);
+    }
+    if (cliType === 'opencode' && this.openCodeClient) {
+      return this.#submitOpenCodeTask(task);
     }
     if (!this.sessionManager) {
       throw new Error('Session manager is required for local CLI session');
@@ -471,10 +484,12 @@ export class TaskOrchestrator extends EventEmitter {
       source: 'task-submit',
       finalize: true,
     });
+    const model = String(task.metadata?.model || '').trim();
     const result = await this.codexClient.submitPrompt({
       sessionKey,
       prompt: task.prompt || '',
       cwd: process.cwd(),
+      model,
     });
     task.structuredThreadId = result.threadId;
     task.turnId = result.turnId;
@@ -534,6 +549,44 @@ export class TaskOrchestrator extends EventEmitter {
     };
   }
 
+  async #submitOpenCodeTask(task) {
+    if (!this.openCodeClient) {
+      throw new Error('OpenCode client is not configured');
+    }
+    const sessionKey = task.metadata?.sessionKey || task.sessionKey || task.id;
+    const sessionId = `opencode:${sessionKey}`;
+    this.#ensureSessionCapacity(sessionId);
+    task.localSessionId = sessionId;
+    task.sessionKey = sessionKey;
+    task.localTransport = 'opencode-run';
+    this.#recordSessionMessage(task, {
+      role: 'user',
+      text: task.prompt || '',
+      source: 'task-submit',
+      finalize: true,
+    });
+    const model = String(task.metadata?.model || '').trim();
+    const result = await this.openCodeClient.submitPrompt({
+      sessionKey,
+      prompt: task.prompt || '',
+      model,
+    });
+    this.taskBySession.set(sessionId, task.id);
+    this.#touchSession(sessionId);
+    this.#recordImmediateResponse(task, result?.text, 'opencode-run');
+    return {
+      upstreamTaskId: sessionId,
+      status: 'completed',
+      raw: {
+        transport: 'opencode-run',
+        cliType: 'opencode',
+        sessionId,
+        sessionKey,
+        opencodeSessionId: result?.sessionId || null,
+      },
+    };
+  }
+
   getTask(taskId) {
     return this.tasks.get(taskId) || null;
   }
@@ -543,6 +596,15 @@ export class TaskOrchestrator extends EventEmitter {
     if (!needle) return null;
     for (const task of this.tasks.values()) {
       if (String(task?.runId || '') === needle) return task;
+    }
+    return null;
+  }
+
+  getTaskByThreadId(threadId) {
+    const needle = String(threadId || '').trim();
+    if (!needle) return null;
+    for (const task of this.tasks.values()) {
+      if (String(task?.metadata?.threadId || task?.threadId || '') === needle) return task;
     }
     return null;
   }
@@ -623,6 +685,42 @@ export class TaskOrchestrator extends EventEmitter {
     return result;
   }
 
+  removeSession(sessionRef, { kill = true } = {}) {
+    if (!sessionRef) return { removed: false, reason: 'missing_session_id' };
+    const task = this.#findTaskBySessionRef(sessionRef);
+    const resolvedSessionId = task?.localSessionId || String(sessionRef);
+
+    if (task?.id) {
+      this.taskBySession.delete(task.id);
+      if (task.localSessionId) this.taskBySession.delete(task.localSessionId);
+      if (task.structuredThreadId) this.taskBySession.delete(task.structuredThreadId);
+      if (task.turnId) this.taskBySession.delete(task.turnId);
+      const timer = this.assistantTurnTimers.get(task.id);
+      if (timer) {
+        clearTimeout(timer);
+        this.assistantTurnTimers.delete(task.id);
+      }
+      task.activeAssistantMessageId = null;
+    }
+
+    this.sessions.delete(resolvedSessionId);
+    this.boundSessions.delete(resolvedSessionId);
+    this.sessionLastActive.delete(resolvedSessionId);
+    this.sessionMessages.delete(resolvedSessionId);
+    this.openClawMirrors.delete(resolvedSessionId);
+
+    const removedFromLocal = Boolean(this.sessionManager?.get?.(resolvedSessionId));
+    if (removedFromLocal) {
+      this.sessionManager?.remove?.(resolvedSessionId, { kill });
+    }
+
+    return {
+      removed: removedFromLocal || Boolean(task),
+      sessionId: resolvedSessionId,
+      taskId: task?.id || null,
+    };
+  }
+
   terminateTask(taskId, reason = 'manual') {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
@@ -642,12 +740,48 @@ export class TaskOrchestrator extends EventEmitter {
     }
 
     task.status = 'terminated';
+    task.controlState = 'terminated';
     task.terminatedAt = Date.now();
     task.turnStatus = 'terminated';
     task.updatedAt = Date.now();
     task.terminateReason = reason;
     this.emit('task:terminated', task);
     this.emit('task:updated', task);
+    return task;
+  }
+
+  pauseTask(taskId, reason = 'manual-pause') {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+    if (task.status === 'terminated' || task.status === 'failed' || task.status === 'completed') {
+      const err = new Error(`Task ${taskId} is not pausable in status ${task.status}`);
+      err.code = 'TASK_NOT_PAUSABLE';
+      throw err;
+    }
+    task.controlState = 'paused';
+    task.status = 'waiting_input';
+    task.pauseReason = reason;
+    task.pausedAt = Date.now();
+    task.updatedAt = Date.now();
+    this.emit('task:updated', task);
+    return task;
+  }
+
+  async resumeTask(taskId, reason = 'manual-resume') {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+    if (task.controlState !== 'paused') {
+      const err = new Error(`Task ${taskId} is not paused`);
+      err.code = 'TASK_NOT_PAUSED';
+      throw err;
+    }
+    task.controlState = 'running';
+    task.resumeReason = reason;
+    task.resumedAt = Date.now();
+    task.status = 'submitted';
+    task.updatedAt = Date.now();
+    this.emit('task:updated', task);
+    await this.#drainStructuredInputQueue(task);
     return task;
   }
 
@@ -752,6 +886,11 @@ export class TaskOrchestrator extends EventEmitter {
   async sendTaskInput(taskId, message, { source = 'task-input' } = {}) {
     const task = this.tasks.get(taskId);
     if (!task) throw new Error(`Unknown task: ${taskId}`);
+    if (task.controlState === 'paused') {
+      const err = new Error(`Task ${taskId} is paused`);
+      err.code = 'TASK_PAUSED';
+      throw err;
+    }
     if (!task.localSessionId) {
       throw new Error(`Task ${taskId} is not backed by a local session`);
     }
@@ -784,6 +923,12 @@ export class TaskOrchestrator extends EventEmitter {
         message,
       });
       this.#recordImmediateResponse(task, response?.text, 'claude-json');
+    } else if (task.localTransport === 'opencode-run') {
+      const response = await this.openCodeClient?.sendInput({
+        sessionKey: task.sessionKey,
+        message,
+      });
+      this.#recordImmediateResponse(task, response?.text, 'opencode-run');
     } else {
       this.sessionManager?.send(task.localSessionId, message);
       task.status = 'submitted';
@@ -829,7 +974,14 @@ export class TaskOrchestrator extends EventEmitter {
           task.turnStatus = 'failed';
           task.error = 'OpenClaw upstream session reported abortedLastRun=true';
           task.completedAt = now;
-        } else if ((outputTokens > 0 || systemSent) && observedUpdatedAt >= Number(task.submittedAt || 0)) {
+        } else if (outputTokens > 0 && observedUpdatedAt >= Number(task.submittedAt || 0)) {
+          task.status = 'completed';
+          task.turnStatus = 'completed';
+          task.completedAt = now;
+          if (!task.answerText) {
+            task.answerText = `OpenClaw run completed (runId=${task.upstreamRunId || task.upstreamTaskId || 'unknown'})`;
+          }
+        } else if (systemSent && observedUpdatedAt >= Number(task.submittedAt || 0)) {
           task.status = 'completed';
           task.turnStatus = 'completed';
           task.completedAt = now;
@@ -918,10 +1070,41 @@ export class TaskOrchestrator extends EventEmitter {
 
   #cleanupExpiredTasks(now) {
     for (const task of this.tasks.values()) {
-      if (!['completed', 'failed', 'terminated'].includes(task.status)) continue;
-      const updatedAt = task.updatedAt || task.completedAt || task.terminatedAt || task.createdAt || now;
-      if (now - updatedAt < this.taskRetentionMs) continue;
-      this.#removeTask(task.id, 'retention-expired');
+      // 中断超时：waiting_input 超过 interruptTtlMs 自动终止
+      if (task.status === 'waiting_input' && task.pausedAt) {
+        if (now - task.pausedAt >= this.interruptTtlMs) {
+          task.status = 'terminated';
+          task.controlState = 'terminated';
+          task.terminatedAt = now;
+          task.updatedAt = now;
+          this.logger.info?.(`[sweep] task ${task.id} terminated: interrupt-timeout`);
+          this.emit('task:terminated', task.id, 'interrupt-timeout');
+        }
+      }
+
+      // completed/failed 超过 15min → 转为 terminated，裁剪大字段
+      if (['completed', 'failed'].includes(task.status)) {
+        const finishedAt = task.completedAt || task.updatedAt || task.createdAt || now;
+        if (now - finishedAt >= this.taskRetentionMs) {
+          task.status = 'terminated';
+          task.controlState = 'terminated';
+          task.terminatedAt = now;
+          task.updatedAt = now;
+          // 裁剪大字段，只保留摘要
+          task.outputBuffer = '';
+          task.lastCallbackPayload = null;
+          task.lastSubmitResult = null;
+          this.emit('task:terminated', task.id, 'retention-expired');
+        }
+      }
+
+      // terminated 超过 5h → 从内存删除
+      if (task.status === 'terminated') {
+        const terminatedAt = task.terminatedAt || task.updatedAt || task.createdAt || now;
+        if (now - terminatedAt >= this.terminatedRetentionMs) {
+          this.#removeTask(task.id, 'retention-expired');
+        }
+      }
     }
   }
 
@@ -954,6 +1137,15 @@ export class TaskOrchestrator extends EventEmitter {
     this.tasks.delete(taskId);
     this.emit('task:evicted', { taskId, reason });
     return true;
+  }
+
+  dismissTask(taskId) {
+    const task = this.tasks.get(taskId);
+    if (!task) throw new Error(`Unknown task: ${taskId}`);
+    if (!['completed', 'failed', 'terminated'].includes(task.status)) {
+      throw new Error(`Task ${taskId} is still active (status=${task.status}); terminate it first`);
+    }
+    this.#removeTask(taskId, 'dismissed');
   }
 
   #removeSession(sessionId, reason) {
@@ -1153,6 +1345,9 @@ export class TaskOrchestrator extends EventEmitter {
     const sessionType = String(task?.sessionType || '').toLowerCase();
     if (!['codex', 'claude', 'gemini'].includes(sessionType)) return false;
     if (task?.metadata?.bridgeOpenClaw === false) return false;
+    const explicitEnabled = task?.metadata?.bridgeOpenClaw === true;
+    const fromBridgeChannel = String(task?.metadata?.source || '').toLowerCase() === 'openclaw-channel';
+    if (!explicitEnabled && !fromBridgeChannel) return false;
     return Boolean(this.client?.ensureSession && this.client?.injectSessionMessage);
   }
 
@@ -1366,8 +1561,9 @@ export class TaskOrchestrator extends EventEmitter {
     const cleanData = this.#sanitizeOutput(text || '');
     if (!cleanData) {
       task.localTransport = source === 'claude-json' ? 'claude-json' : task.localTransport || 'local-cli';
-      task.turnStatus = 'completed';
-      task.status = 'completed';
+      task.turnStatus = 'failed';
+      task.status = 'failed';
+      task.error = `Empty assistant output from ${source}`;
       task.completedAt = Date.now();
       return;
     }
@@ -1436,6 +1632,7 @@ export class TaskOrchestrator extends EventEmitter {
           sessionKey: task.sessionKey,
           threadId: task.structuredThreadId,
           message: next.message,
+          model: String(task.metadata?.model || '').trim(),
         });
         task.turnId = response?.turnId || task.turnId || null;
         task.status = 'submitted';
@@ -1539,10 +1736,12 @@ export class TaskOrchestrator extends EventEmitter {
   }
 
   #assertSessionAvailability(task) {
+    if (task?.metadata?.allowParallelInSession === true) return;
     const sessionKey = this.#normalizeSessionKey(task?.sessionKey || task?.metadata?.sessionKey || task?.id);
     if (!sessionKey) return;
     for (const other of this.tasks.values()) {
       if (!other || other.id === task.id) continue;
+      if (other?.metadata?.allowParallelInSession === true) continue;
       const otherKey = this.#normalizeSessionKey(other.sessionKey || other.metadata?.sessionKey || other.id);
       if (otherKey !== sessionKey) continue;
       if (!this.#isTaskActive(other)) continue;
@@ -1560,6 +1759,10 @@ export class TaskOrchestrator extends EventEmitter {
       runId: task.runId || `run:${task.id}`,
       taskId: task.id,
       sessionKey: task.sessionKey || task.metadata?.sessionKey || task.id,
+      agentId: task.agentId || task.metadata?.agentId || null,
+      threadId: task.threadId || task.metadata?.threadId || null,
+      attempt: Number(task.attempt || task.metadata?.attempt || 1),
+      controlState: task.controlState || 'running',
       runtime: String(task.sessionType || '').toLowerCase() || 'openclaw',
       status: this.#statusToRunStatus(task.status),
       ts: Date.now(),

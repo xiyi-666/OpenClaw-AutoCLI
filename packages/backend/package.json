@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env src/index.js",
+    "build": "node -e \"console.log('backend build placeholder')\"",
+    "lint": "node -e \"console.log('backend lint placeholder')\"",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0"
+  }
+}

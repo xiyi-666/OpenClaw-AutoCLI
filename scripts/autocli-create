@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${AUTOCLI_BASE_URL:-http://127.0.0.1:8700}"
+TIMEOUT="${AUTOCLI_TIMEOUT:-30}"
+TASK_ID=""
+PROMPT=""
+SESSION_TYPE="openclaw"
+CALLBACK_BASE_URL=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base-url) BASE_URL="$2"; shift 2 ;;
+    --id) TASK_ID="$2"; shift 2 ;;
+    --prompt) PROMPT="$2"; shift 2 ;;
+    --session-type) SESSION_TYPE="$2"; shift 2 ;;
+    --callback-base-url) CALLBACK_BASE_URL="$2"; shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+if [[ -z "$TASK_ID" || -z "$PROMPT" ]]; then
+  echo "Usage: autocli-create --id <task-id> --prompt <text> [--session-type <type>] [--callback-base-url <url>] [--base-url <url>]" >&2
+  exit 1
+fi
+
+if [[ -z "$CALLBACK_BASE_URL" ]]; then
+  CALLBACK_BASE_URL="$BASE_URL"
+fi
+
+curl -sS --max-time "$TIMEOUT" -X POST "$BASE_URL/tasks" \
+  -H 'content-type: application/json' \
+  -d "{\"id\":\"$TASK_ID\",\"prompt\":\"$PROMPT\",\"sessionType\":\"$SESSION_TYPE\",\"callbackBaseUrl\":\"$CALLBACK_BASE_URL\",\"metadata\":{\"source\":\"autocli-create\"}}"
+echo

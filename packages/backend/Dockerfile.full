@@ -1,0 +1,13 @@
+FROM node:22-alpine
+RUN apk add --no-cache python3 py3-pip git curl bash
+WORKDIR /app
+COPY package.json ./
+RUN npm install
+RUN npm install -g \
+    @anthropic-ai/claude-code \
+    @google/gemini-cli \
+    @openai/codex \
+    opencode-ai
+COPY src ./src
+EXPOSE 8700 8701
+CMD ["node", "src/index.js"]

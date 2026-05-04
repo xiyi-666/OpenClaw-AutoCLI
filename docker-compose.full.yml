@@ -1,0 +1,43 @@
+# docker-compose.full.yml — 新环境版本（容器内安装所有 CLI）
+services:
+  backend:
+    build:
+      context: ./packages/backend
+      dockerfile: Dockerfile.full
+    ports:
+      - "8700:8700"
+      - "8701:8701"
+    env_file:
+      - .env
+    volumes:
+      - workspaces:/app/.workspaces
+      - cli-auth:/root
+    restart: unless-stopped
+
+  frontend:
+    build: ./packages/frontend
+    ports:
+      - "5120:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # 自动更新：每天凌晨 2 点检查并更新 CLI
+  cli-updater:
+    build:
+      context: ./packages/backend
+      dockerfile: Dockerfile.full
+    volumes:
+      - cli-auth:/root
+    entrypoint: >
+      sh -c "while true; do
+        echo '[updater] checking CLI updates...';
+        npm update -g @anthropic-ai/claude-code @google/gemini-cli @openai/codex opencode-ai;
+        echo '[updater] done, sleeping 24h';
+        sleep 86400;
+      done"
+    restart: unless-stopped
+
+volumes:
+  workspaces:
+  cli-auth:   # 持久化 CLI 认证信息（claude/gemini 登录态）

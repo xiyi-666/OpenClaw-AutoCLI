@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: ./packages/backend
+    ports:
+      - "8700:8700"
+      - "8701:8701"
+    env_file:
+      - .env
+    volumes:
+      - workspaces:/app/.workspaces
+    restart: unless-stopped
+
+  frontend:
+    build: ./packages/frontend
+    ports:
+      - "5120:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  workspaces:

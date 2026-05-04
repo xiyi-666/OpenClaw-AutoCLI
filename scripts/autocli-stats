@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${AUTOCLI_BASE_URL:-http://127.0.0.1:8700}"
+TIMEOUT="${AUTOCLI_TIMEOUT:-15}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base-url) BASE_URL="$2"; shift 2 ;;
+    *) echo "Unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+
+curl -sS --max-time "$TIMEOUT" "$BASE_URL/tasks/stats"
+echo

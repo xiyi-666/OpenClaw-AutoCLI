@@ -69,6 +69,30 @@ test('submitTask delegates to openclaw client', async () => {
   assert.equal(orchestrator.tasks.get('task-1').status, 'submitted');
 });
 
+test('local codex tasks do not bridge to openclaw by default', async () => {
+  const injections = [];
+  const client = {
+    ensureSession: async () => ({ sessionKey: 's1' }),
+    injectSessionMessage: async (payload) => {
+      injections.push(payload);
+      return { ok: true };
+    },
+  };
+  const codexClient = new EventEmitter();
+  codexClient.submitPrompt = async () => ({
+    threadId: 'thread-local-1',
+    turnId: 'turn-local-1',
+  });
+  const orchestrator = new TaskOrchestrator({ client, sessionManager: null, codexClient });
+  orchestrator.addTask({ id: 'task-local-no-bridge', prompt: 'hello', sessionType: 'codex' });
+  await orchestrator.submitTask('task-local-no-bridge');
+  codexClient.emit('delta', { threadId: 'thread-local-1', turnId: 'turn-local-1', delta: 'OK' });
+  codexClient.emit('turn:completed', { threadId: 'thread-local-1', turn: { id: 'turn-local-1', status: 'completed' } });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(injections.length, 0);
+  orchestrator.close();
+});
+
 test('submitTask routes codex tasks to structured codex client by default', async () => {
   const codexClient = {
     submitPrompt: async ({ sessionKey, prompt }) => ({
@@ -310,6 +334,61 @@ test('submitTask enforces single active task per session key and reuses session 
   delete process.env.OPENCLAW_CLAUDE_TRANSPORT;
 });
 
+test('submitTask allows parallel workers in same session when allowParallelInSession is true', async () => {
+  const codexClient = {
+    submitPrompt: async ({ sessionKey }) => ({
+      threadId: `thread-${sessionKey}-${Math.random()}`,
+      turnId: 'turn-1',
+    }),
+    sendInput: async ({ threadId }) => ({ threadId, turnId: 'turn-2' }),
+    on: () => {},
+  };
+  const orchestrator = new TaskOrchestrator({ client: null, sessionManager: null, codexClient });
+  orchestrator.addTask({
+    id: 'task-par-1',
+    prompt: 'first worker',
+    sessionType: 'codex',
+    metadata: { sessionKey: 'agent-1', allowParallelInSession: true },
+  });
+  orchestrator.addTask({
+    id: 'task-par-2',
+    prompt: 'second worker',
+    sessionType: 'codex',
+    metadata: { sessionKey: 'agent-1', allowParallelInSession: true },
+  });
+
+  const first = await orchestrator.submitTask('task-par-1');
+  const second = await orchestrator.submitTask('task-par-2');
+
+  assert.equal(first.status, 'started');
+  assert.equal(second.status, 'started');
+  orchestrator.close();
+});
+
+test('pauseTask and resumeTask update control state and gate inputs', async () => {
+  const codexClient = {
+    submitPrompt: async () => ({ threadId: 'thread-pause-1', turnId: 'turn-1' }),
+    sendInput: async () => ({ threadId: 'thread-pause-1', turnId: 'turn-2' }),
+    on: () => {},
+  };
+  const orchestrator = new TaskOrchestrator({ client: null, sessionManager: null, codexClient });
+  orchestrator.addTask({ id: 'task-pause-1', prompt: 'boot', sessionType: 'codex' });
+  await orchestrator.submitTask('task-pause-1');
+
+  const paused = orchestrator.pauseTask('task-pause-1', 'test');
+  assert.equal(paused.controlState, 'paused');
+  assert.equal(paused.status, 'waiting_input');
+  await assert.rejects(
+    () => orchestrator.sendTaskInput('task-pause-1', 'should fail'),
+    (error) => error?.code === 'TASK_PAUSED',
+  );
+
+  const resumed = await orchestrator.resumeTask('task-pause-1', 'test');
+  assert.equal(resumed.controlState, 'running');
+  assert.equal(resumed.status, 'submitted');
+  orchestrator.close();
+});
+
 test('local cli defaults include auto-approval args for claude and gemini', async () => {
   process.env.OPENCLAW_CLAUDE_TRANSPORT = 'cli';
   const created = [];
@@ -485,7 +564,12 @@ test('bridged local session keeps history and mirrors turns to openclaw', async 
     sendInput: async () => ({ sessionId: 'claude-s-bridge', text: 'second reply' }),
   };
   const orchestrator = new TaskOrchestrator({ client, sessionManager: null, claudeClient });
-  orchestrator.addTask({ id: 'task-bridge-1', prompt: 'first prompt', sessionType: 'claude' });
+  orchestrator.addTask({
+    id: 'task-bridge-1',
+    prompt: 'first prompt',
+    sessionType: 'claude',
+    metadata: { bridgeOpenClaw: true },
+  });
 
   await orchestrator.submitTask('task-bridge-1');
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -522,7 +606,12 @@ test('openclaw mirror injection preserves message order per session', async () =
     sendInput: async ({ message }) => ({ sessionId: 'claude-order-1', text: message.includes('SECOND') ? 'SECOND' : 'THIRD' }),
   };
   const orchestrator = new TaskOrchestrator({ client, sessionManager: null, claudeClient });
-  orchestrator.addTask({ id: 'task-mirror-order-1', prompt: 'first prompt', sessionType: 'claude' });
+  orchestrator.addTask({
+    id: 'task-mirror-order-1',
+    prompt: 'first prompt',
+    sessionType: 'claude',
+    metadata: { bridgeOpenClaw: true },
+  });
 
   await orchestrator.submitTask('task-mirror-order-1');
   await orchestrator.sendTaskInput('task-mirror-order-1', 'send SECOND');
@@ -559,7 +648,12 @@ test('dispatchSessionMessage can trigger openclaw run for bridged session', asyn
     submitPrompt: async () => ({ sessionId: 'claude-s-dispatch', text: 'reply' }),
   };
   const orchestrator = new TaskOrchestrator({ client, sessionManager: null, claudeClient });
-  orchestrator.addTask({ id: 'task-dispatch-1', prompt: 'hello', sessionType: 'claude' });
+  orchestrator.addTask({
+    id: 'task-dispatch-1',
+    prompt: 'hello',
+    sessionType: 'claude',
+    metadata: { bridgeOpenClaw: true },
+  });
 
   await orchestrator.submitTask('task-dispatch-1');
   const result = await orchestrator.dispatchSessionMessage('claude:task-dispatch-1', {
@@ -615,7 +709,12 @@ test('pollInboundBridge forwards new openclaw user turns into local cli session'
     claudeClient,
     inboundBridgePollIntervalMs: 60_000,
   });
-  orchestrator.addTask({ id: 'task-inbound-1', prompt: 'hello', sessionType: 'claude' });
+  orchestrator.addTask({
+    id: 'task-inbound-1',
+    prompt: 'hello',
+    sessionType: 'claude',
+    metadata: { bridgeOpenClaw: true },
+  });
 
   await orchestrator.submitTask('task-inbound-1');
   await orchestrator.pollInboundBridge();
@@ -657,7 +756,12 @@ test('gateway session.message forwards openclaw ui turn into local cli immediate
     gatewaySubscriber,
     inboundBridgePollIntervalMs: 60_000,
   });
-  orchestrator.addTask({ id: 'task-gateway-1', prompt: 'boot', sessionType: 'claude' });
+  orchestrator.addTask({
+    id: 'task-gateway-1',
+    prompt: 'boot',
+    sessionType: 'claude',
+    metadata: { bridgeOpenClaw: true },
+  });
 
   await orchestrator.submitTask('task-gateway-1');
   gatewaySubscriber.emit('session:message', {
@@ -705,7 +809,12 @@ test('gateway session.message accepts seq zero user turn by fingerprint', async 
     gatewaySubscriber,
     inboundBridgePollIntervalMs: 60_000,
   });
-  orchestrator.addTask({ id: 'task-gateway-2', prompt: 'boot', sessionType: 'claude' });
+  orchestrator.addTask({
+    id: 'task-gateway-2',
+    prompt: 'boot',
+    sessionType: 'claude',
+    metadata: { bridgeOpenClaw: true },
+  });
 
   await orchestrator.submitTask('task-gateway-2');
   const ts = Date.now();
@@ -770,7 +879,12 @@ test('gateway + poll do not duplicate seq zero inbound turn', async () => {
     gatewaySubscriber,
     inboundBridgePollIntervalMs: 60_000,
   });
-  orchestrator.addTask({ id: 'task-gateway-poll-1', prompt: 'boot', sessionType: 'claude' });
+  orchestrator.addTask({
+    id: 'task-gateway-poll-1',
+    prompt: 'boot',
+    sessionType: 'claude',
+    metadata: { bridgeOpenClaw: true },
+  });
 
   await orchestrator.submitTask('task-gateway-poll-1');
   gatewaySubscriber.emit('session:message', {
