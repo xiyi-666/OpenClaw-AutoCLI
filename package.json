@@ -7,8 +7,8 @@
   "scripts": {
     "dev:backend": "npm --workspace @openclaw/backend run dev",
     "dev:frontend": "npm --workspace @openclaw/frontend run dev",
-    "dev:bg": "bash ./scripts/dev-bg",
-    "dev:stop": "bash ./scripts/dev-stop",
+    "dev:bg": "bash ./skills/autocli/scripts/dev-bg",
+    "dev:stop": "bash ./skills/autocli/scripts/dev-stop",
     "build": "npm run build -w @openclaw/backend && npm run build -w @openclaw/frontend",
     "lint": "npm run lint -w @openclaw/backend && npm run lint -w @openclaw/frontend"
   }
