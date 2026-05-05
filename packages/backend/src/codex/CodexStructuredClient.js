@@ -2,9 +2,13 @@ import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
 import { readFileSync as _rf, writeFileSync as _wf, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
 
-const DEFAULT_STORE = process.env.OPENCLAW_CODEX_SESSION_STORE || '.workspaces/.codex-sessions.json';
+function defaultStorePath() {
+  if (process.env.OPENCLAW_CODEX_SESSION_STORE) return process.env.OPENCLAW_CODEX_SESSION_STORE;
+  return resolve(process.env.AUTOCLI_WORKSPACE_ROOT || resolve(homedir(), '.autocli'), '.codex-sessions.json');
+}
 
 const DEFAULT_LISTEN_URL = process.env.OPENCLAW_CODEX_APP_SERVER_URL || 'ws://127.0.0.1:8788';
 const DEFAULT_TIMEOUT_MS = Number(process.env.OPENCLAW_CODEX_APP_SERVER_TIMEOUT_MS || 30000);
@@ -18,7 +22,7 @@ export class CodexStructuredClient extends EventEmitter {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     autostart = process.env.OPENCLAW_CODEX_APP_SERVER_AUTOSTART !== '0',
     logger = console,
-    storePath = DEFAULT_STORE,
+    storePath = defaultStorePath(),
   } = {}) {
     super();
     this.command = command;

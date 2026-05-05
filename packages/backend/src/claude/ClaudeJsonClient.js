@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { readFileSync as _rf, writeFileSync as _wf, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { homedir } from 'node:os';
 
-const DEFAULT_STORE = process.env.OPENCLAW_CLAUDE_SESSION_STORE || '.workspaces/.claude-sessions.json';
+function defaultStorePath() {
+  if (process.env.OPENCLAW_CLAUDE_SESSION_STORE) return process.env.OPENCLAW_CLAUDE_SESSION_STORE;
+  return resolve(process.env.AUTOCLI_WORKSPACE_ROOT || resolve(homedir(), '.autocli'), '.claude-sessions.json');
+}
 
 export class ClaudeJsonClient {
   constructor({
@@ -14,7 +18,7 @@ export class ClaudeJsonClient {
       IS_SANDBOX: process.env.IS_SANDBOX || '1',
     },
     timeoutMs = Number(process.env.OPENCLAW_CLAUDE_TIMEOUT_MS || 120000),
-    storePath = DEFAULT_STORE,
+    storePath = defaultStorePath(),
   } = {}) {
     this.command = command;
     this.cwd = cwd;

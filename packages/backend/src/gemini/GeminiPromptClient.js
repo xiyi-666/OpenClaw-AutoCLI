@@ -3,7 +3,13 @@ import { spawn } from 'node:child_process';
 import { readFileSync as _rf, writeFileSync as _wf, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-const DEFAULT_STORE = process.env.OPENCLAW_GEMINI_SESSION_STORE || '.workspaces/.gemini-sessions.json';
+import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+
+function defaultStorePath() {
+  if (process.env.OPENCLAW_GEMINI_SESSION_STORE) return process.env.OPENCLAW_GEMINI_SESSION_STORE;
+  return resolve(process.env.AUTOCLI_WORKSPACE_ROOT || resolve(homedir(), '.autocli'), '.gemini-sessions.json');
+}
 
 export class GeminiPromptClient {
   constructor({
@@ -13,7 +19,7 @@ export class GeminiPromptClient {
       ...process.env,
       IS_SANDBOX: process.env.IS_SANDBOX || '1',
     },
-    storePath = DEFAULT_STORE,
+    storePath = defaultStorePath(),
     timeoutMs = Number(process.env.OPENCLAW_GEMINI_TIMEOUT_MS || 180000),
   } = {}) {
     this.command = command;

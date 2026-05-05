@@ -1,7 +1,15 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename } from 'node:path';
 import { isAbsolute, resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
+
+import { SessionStore } from './session/SessionStore.js';
 
 import { ClaudeJsonClient } from './claude/ClaudeJsonClient.js';
 import { GeminiPromptClient } from './gemini/GeminiPromptClient.js';
@@ -23,13 +31,36 @@ function sanitizeWorkspaceName(name) {
     .replace(/^[-.]+|[-.]+$/g, '') || 'session';
 }
 
+function getDefaultWorkspaceRoot() {
+  const projectName = process.env.AUTOCLI_PROJECT_NAME || sanitizeWorkspaceName(basename(process.cwd())) || 'project';
+  const base = process.env.AUTOCLI_WORKSPACE_ROOT || resolve(homedir(), '.autocli');
+  return resolve(base, projectName);
+}
+
+async function createWorktree(taskId, repoRoot, branch) {
+  const worktreePath = resolve(homedir(), '.autocli', '.worktrees', sanitizeWorkspaceName(taskId));
+  mkdirSync(resolve(homedir(), '.autocli', '.worktrees'), { recursive: true });
+  await execFileAsync('git', ['-C', repoRoot, 'worktree', 'add', worktreePath, '-b', branch], { timeout: 15000 });
+  return worktreePath;
+}
+
+async function removeWorktree(repoRoot, worktreePath) {
+  try {
+    await execFileAsync('git', ['-C', repoRoot, 'worktree', 'remove', '--force', worktreePath], { timeout: 10000 });
+  } catch {}
+}
+
+function getGitRoot() {
+  return process.env.AUTOCLI_GIT_ROOT || process.cwd();
+}
+
 function createWorkspaceCwd({ sessionId, cliType, cwd, workspaceRoot }) {
   if (cwd) {
     const resolvedCwd = isAbsolute(cwd) ? cwd : resolve(process.cwd(), cwd);
     mkdirSync(resolvedCwd, { recursive: true });
     return resolvedCwd;
   }
-  const root = workspaceRoot || resolve(process.cwd(), '.workspaces');
+  const root = workspaceRoot || getDefaultWorkspaceRoot();
   const safeCli = sanitizeWorkspaceName(cliType || 'session');
   const safeSession = sanitizeWorkspaceName(sessionId || 'session');
   const resolved = resolve(root, safeCli, safeSession);
@@ -63,7 +94,7 @@ export function createRuntime({
   openCodeClient = new OpenCodeRunClient(),
   gatewaySubscriber = new OpenClawGatewaySubscriber(),
   orchestrator = null,
-  workspaceRoot = process.env.OPENCLAW_WORKSPACE_ROOT || resolve(process.cwd(), '.workspaces'),
+  workspaceRoot = getDefaultWorkspaceRoot(),
 } = {}) {
   const runtimeOrchestrator = orchestrator || new TaskOrchestrator({
     client,
@@ -108,7 +139,7 @@ export function createAppServer({
   geminiClient,
   openCodeClient,
   orchestrator,
-  workspaceRoot = resolve(process.cwd(), '.workspaces'),
+  workspaceRoot = getDefaultWorkspaceRoot(),
 }) {
   const softTimeoutMs = Math.max(0, Number(process.env.OPENCLAW_HTTP_SOFT_TIMEOUT_MS || 60000));
   const bridgeMaxRetry = Math.max(0, Number(process.env.OPENCLAW_BRIDGE_MAX_RETRY || 3));
@@ -124,6 +155,7 @@ export function createAppServer({
   const acpxLocalOutputCursor = new Map();
   const openClawSessionBindings = new Map();
   const frontendSessions = new Map();
+  const sessionStore = new SessionStore();
   const gatewayToken = String(process.env.OPENCLAW_GATEWAY_TOKEN || process.env.OPENCLAW_API_KEY || '').trim();
   const authorizeBridgeRequest = (req) => {
     if (!gatewayToken) return true;
@@ -181,7 +213,9 @@ export function createAppServer({
 
   const getAcpxHistory = (sessionId) => {
     if (!acpxSessionHistory.has(sessionId)) {
-      acpxSessionHistory.set(sessionId, []);
+      // 启动时从磁盘恢复
+      const stored = sessionStore.load(sessionId);
+      acpxSessionHistory.set(sessionId, stored?.history || []);
     }
     return acpxSessionHistory.get(sessionId);
   };
@@ -190,16 +224,19 @@ export function createAppServer({
     const text = String(content || '').trim();
     if (!text) return;
     const history = getAcpxHistory(sessionId);
-    history.push({
-      id: randomUUID(),
-      role,
-      content: text,
-      timestamp: Date.now(),
-      ...extra,
+    history.push({ id: randomUUID(), role, content: text, timestamp: Date.now(), ...extra });
+    if (history.length > 200) history.splice(0, history.length - 200);
+    // 持久化
+    const session = acpxSessions.get(sessionId);
+    sessionStore.save(sessionId, {
+      sessionKey: session?.sessionKey || sessionId,
+      cliType: session?.cliType || null,
+      cwd: session?.cwd || null,
+      model: session?.model || null,
+      createdAt: session?.createdAt || null,
+      updatedAt: Date.now(),
+      history,
     });
-    if (history.length > 200) {
-      history.splice(0, history.length - 200);
-    }
   };
 
   const pushAcpxHistoryForKey = (sessionKey, role, content, extra = {}) => {
@@ -801,14 +838,43 @@ export function createAppServer({
       const task = orchestrator.tasks?.get(event.taskId);
       const answer = task?.answerText || event.message || '';
       const errText = task?.error || '';
-      // Minimal notification — let the session agent query and summarize the result itself
       const baseUrl = process.env.AUTOCLI_BASE_URL || 'http://127.0.0.1:8700';
+
+      // 失败自动重试
+      if (event.status === 'failed' && task) {
+        const retryCount = Number(task.retryCount || 0);
+        const maxRetry = Number(task.maxRetry ?? 3);
+        if (retryCount < maxRetry) {
+          task.retryCount = retryCount + 1;
+          task.status = 'queued';
+          task.error = null;
+          task.updatedAt = Date.now();
+          orchestrator.taskStore?.save(task.id, task);
+          setTimeout(() => {
+            orchestrator.submitTask(task.id).catch((err) => {
+              console.warn(`[retry] submitTask failed for ${task.id}:`, err.message);
+            });
+          }, 2000);
+          const replyKey = task.originSessionKey || task.metadata?.originSessionKey || event.sessionKey;
+          if (client?.sendSessionMessage) {
+            client.sendSessionMessage({ sessionKey: replyKey, message: `[autocli] task \`${task.id}\` 失败，自动重试 ${task.retryCount}/${maxRetry}...`, deliver: false })
+              .catch(() => {});
+          }
+          return;
+        }
+      }
+
       let msg = `[autocli] task \`${event.taskId}\` → **${event.status}**`;
       if (errText) msg += `\nError: ${errText.slice(0, 120)}`;
       msg += `\n\n请调用 \`GET ${baseUrl}/tasks/${event.taskId}\` 获取完整结果并总结输出。`;
 
+      // worktree 清理
+      if (task?.worktree) removeWorktree(getGitRoot(), task.worktree).catch(() => {});
+
+      // 回调到发起任务的 openclaw 会话（originSessionKey），若无则回调到任务自身 sessionKey
+      const replySessionKey = task?.originSessionKey || task?.metadata?.originSessionKey || event.sessionKey;
       if (client?.sendSessionMessage) {
-        client.sendSessionMessage({ sessionKey: event.sessionKey, message: msg, deliver: false })
+        client.sendSessionMessage({ sessionKey: replySessionKey, message: msg, deliver: false })
           .catch((err) => console.warn('[callback] sendSessionMessage failed:', err.message));
       }
 
@@ -830,6 +896,22 @@ export function createAppServer({
       }
     }
   });
+
+  // IMPL-4: 定时监控 — 检测超时任务，触发重试
+  const monitorIntervalMs = Number(process.env.AUTOCLI_MONITOR_INTERVAL_MS || 600000);
+  const taskTimeoutMs = Number(process.env.AUTOCLI_TASK_TIMEOUT_MS || 1800000);
+  const monitorTimer = setInterval(() => {
+    const now = Date.now();
+    for (const task of orchestrator.tasks?.values() || []) {
+      if (task.status === 'submitted' && task.submittedAt && (now - task.submittedAt) > taskTimeoutMs) {
+        task.status = 'failed';
+        task.error = 'task timeout';
+        task.updatedAt = now;
+        orchestrator.emit('task:updated', task);
+      }
+    }
+  }, monitorIntervalMs);
+  if (typeof monitorTimer.unref === 'function') monitorTimer.unref();
 
   const normalizeTaskPayload = (payload) => {
     const normalized = { ...(payload || {}) };
@@ -865,11 +947,18 @@ export function createAppServer({
     if (!normalized.attempt) {
       normalized.attempt = Number(normalized.metadata.attempt || 1);
     }
+    if (!normalized.originSessionKey) {
+      normalized.originSessionKey = normalized.metadata.originSessionKey || normalized.metadata.sessionKey || '';
+    }
+    if (!normalized.cwd && normalized.metadata.cwd) {
+      normalized.cwd = normalized.metadata.cwd;
+    }
     normalized.metadata = {
       ...normalized.metadata,
       ...(normalized.agentId ? { agentId: normalized.agentId } : {}),
       ...(normalized.threadId ? { threadId: normalized.threadId } : {}),
       attempt: Number(normalized.attempt || 1),
+      ...(normalized.originSessionKey ? { originSessionKey: normalized.originSessionKey } : {}),
     };
     return normalized;
   };
@@ -1098,6 +1187,7 @@ export function createAppServer({
             createdAt: Date.now(),
           };
           acpxSessions.set(acpxSession.id, acpxSession);
+          sessionStore.save(acpxSession.id, { sessionKey: acpxSession.sessionKey, cliType: acpxSession.cliType, cwd: acpxSession.cwd, model: acpxSession.model, createdAt: acpxSession.createdAt, updatedAt: Date.now(), history: [] });
           upsertFrontendSession(acpxSession);
           getAcpxHistory(acpxSession.id);
           /* Notify the user when codex app-server is unavailable and the session
@@ -1961,6 +2051,17 @@ export function createAppServer({
 
     if (pathname === '/tasks' && req.method === 'POST') {
       const payload = normalizeTaskPayload(await readJson());
+      if (!payload.cwd) {
+        payload.cwd = createWorkspaceCwd({ sessionId: payload.sessionKey, cliType: payload.sessionType, workspaceRoot });
+      }
+      if (!payload.branch && payload.useWorktree && process.env.AUTOCLI_USE_WORKTREE !== '0') {
+        const branch = `autocli/${sanitizeWorkspaceName(payload.sessionKey || payload.id)}`;
+        try {
+          payload.worktree = await createWorktree(payload.id, getGitRoot(), branch);
+          payload.branch = branch;
+          payload.cwd = payload.worktree;
+        } catch {}
+      }
       try {
         orchestrator.addTask(payload);
         const outcome = await withSoftTimeout(
@@ -1994,6 +2095,9 @@ export function createAppServer({
         ...raw,
         id: raw.taskId || raw.id || raw.runId || raw.idempotencyKey,
       });
+      if (!payload.cwd) {
+        payload.cwd = createWorkspaceCwd({ sessionId: payload.sessionKey, cliType: payload.sessionType, workspaceRoot });
+      }
       try {
         orchestrator.addTask(payload);
         const outcome = await withSoftTimeout(
@@ -2087,6 +2191,7 @@ export function createAppServer({
       ensureAcpxLocalSession(session);
       acpxSessions.set(session.id, session);
       acpxSessionsByKey.set(sessionKey, session.id);
+      sessionStore.save(session.id, { sessionKey: session.sessionKey, cliType: session.cliType, cwd: session.cwd, model: session.model, createdAt: session.createdAt, updatedAt: Date.now(), history: [] });
       getAcpxHistory(session.id);
       upsertFrontendSession(session);
       sendJson(200, {
@@ -2253,55 +2358,53 @@ export function createAppServer({
         historyCount: getAcpxHistory(mappedSessionId).length,
       });
       /* Get assistant response: ClaudeJsonClient for Claude, GeminiPromptClient for Gemini, local CLI for others */
-      let assistantText = '';
-      if (isClaudeSession && mappedSession) {
+      /* Fire-and-forget: respond immediately, process async, callback on completion */
+      const asyncSessionKey = sessionKey;
+      const asyncMappedSessionId = mappedSessionId;
+      const asyncLocalSessionId = localSessionId;
+      const asyncLocalCliType = localCliType;
+      const asyncIsClaudeSession = isClaudeSession;
+      const asyncIsGeminiSession = isGeminiSession;
+      const asyncIsOpenCodeSession = isOpenCodeSession;
+      const asyncMappedSession = mappedSession;
+
+      sendJson(202, { ok: true, sessionKey, accepted: true, async: true, target: String(payload.target || 'local') });
+
+      ;(async () => {
+        let assistantText = '';
         try {
-          assistantText = await dispatchViaClaudeJson(mappedSession, text);
+          if (asyncIsClaudeSession && asyncMappedSession) {
+            assistantText = await dispatchViaClaudeJson(asyncMappedSession, text);
+          } else if (asyncIsGeminiSession && asyncMappedSession) {
+            assistantText = await dispatchViaGeminiPrompt(asyncMappedSession, text);
+          } else if (asyncIsOpenCodeSession && asyncMappedSession) {
+            assistantText = await dispatchViaOpenCodeRun(asyncMappedSession, text);
+          } else if (asyncLocalSessionId) {
+            assistantText = await waitForAcpxLocalReply(asyncLocalSessionId, 30000, asyncLocalCliType);
+          }
         } catch (err) {
           assistantText = '';
         }
-      } else if (isGeminiSession && mappedSession) {
-        try {
-          assistantText = await dispatchViaGeminiPrompt(mappedSession, text);
-        } catch (err) {
-          assistantText = '';
+        if (assistantText) {
+          const replySource = asyncIsClaudeSession ? 'claude-json'
+            : (asyncIsGeminiSession ? 'gemini-prompt'
+              : (asyncIsOpenCodeSession ? 'opencode-run' : 'acpx-local-cli'));
+          pushAcpxHistoryForKey(asyncSessionKey, 'assistant', assistantText, { source: replySource });
+          orchestrator.emit('session:message', {
+            sessionId: asyncMappedSessionId,
+            message: { id: randomUUID(), role: 'assistant', text: assistantText, source: replySource, createdAt: Date.now(), updatedAt: Date.now(), status: 'completed' },
+            update: false,
+            historyCount: getAcpxHistory(asyncMappedSessionId).length,
+          });
+          // 回调到发起会话
+          if (client?.sendSessionMessage) {
+            const baseUrl = process.env.AUTOCLI_BASE_URL || 'http://127.0.0.1:8700';
+            const replyMsg = `[autocli] session \`${asyncSessionKey}\` 回复完成\n\n请调用 \`GET ${baseUrl}/acp/sessions/${encodeURIComponent(asyncSessionKey)}\` 获取完整对话。`;
+            client.sendSessionMessage({ sessionKey: asyncSessionKey, message: replyMsg, deliver: false })
+              .catch((err) => console.warn('[dispatch-callback] failed:', err.message));
+          }
         }
-      } else if (isOpenCodeSession && mappedSession) {
-        try {
-          assistantText = await dispatchViaOpenCodeRun(mappedSession, text);
-        } catch (err) {
-          assistantText = '';
-        }
-      } else if (localSessionId) {
-        assistantText = await waitForAcpxLocalReply(localSessionId, 30000, localCliType);
-      }
-      if (assistantText) {
-        const replySource = isClaudeSession
-          ? 'claude-json'
-          : (isGeminiSession ? 'gemini-prompt'
-            : (isOpenCodeSession ? 'opencode-run' : 'acpx-local-cli'));
-        pushAcpxHistoryForKey(sessionKey, 'assistant', assistantText, { source: replySource });
-        orchestrator.emit('session:message', {
-          sessionId: mappedSessionId,
-          message: {
-            id: randomUUID(),
-            role: 'assistant',
-            text: assistantText,
-            source: replySource,
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-            status: 'completed',
-          },
-          update: false,
-          historyCount: getAcpxHistory(mappedSessionId).length,
-        });
-      }
-      sendJson(200, {
-        ok: true,
-        sessionKey,
-        accepted: true,
-        target: String(payload.target || 'local'),
-      });
+      })();
       return;
     }
 
@@ -2369,6 +2472,7 @@ export function createAppServer({
           runtime,
           prompt: text,
           sessionKey,
+          originSessionKey: sessionKey,
           agentId,
           threadId,
           attempt,

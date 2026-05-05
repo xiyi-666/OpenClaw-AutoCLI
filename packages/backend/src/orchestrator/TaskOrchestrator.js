@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { TaskStore } from '../session/TaskStore.js';
 
 const ANSI_PATTERN = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[@-_]/g;
 const CONTROL_PATTERN = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
@@ -64,6 +65,7 @@ export class TaskOrchestrator extends EventEmitter {
     claudeClient,
     openCodeClient,
     gatewaySubscriber,
+    taskStore = new TaskStore(),
     logger = console,
     maxTasks = DEFAULT_MAX_TASKS,
     maxSessions = DEFAULT_MAX_SESSIONS,
@@ -86,8 +88,15 @@ export class TaskOrchestrator extends EventEmitter {
     this.openCodeClient = openCodeClient;
     this.gatewaySubscriber = gatewaySubscriber;
     this.logger = logger;
+    this.taskStore = taskStore;
     this.tasks = new Map();
     this.sessions = new Map();
+    // 启动时从磁盘恢复任务
+    for (const saved of this.taskStore.list()) {
+      if (saved && saved.id && ["queued","submitted"].includes(saved.status)) {
+        this.tasks.set(saved.id, { ...saved, status: "queued", retryCount: saved.retryCount || 0, maxRetry: saved.maxRetry ?? 3 });
+      }
+    }
     this.taskBySession = new Map();
     this.boundSessions = new Set();
     this.sessionLastActive = new Map();
@@ -227,10 +236,14 @@ export class TaskOrchestrator extends EventEmitter {
         this.#emitRunEvent('run.completed', task, {
           message: task?.answerText || '',
         });
+        this.taskStore?.remove(task.id);
       } else if (task?.status === 'failed') {
         this.#emitRunEvent('run.failed', task, {
           message: task?.error || 'run failed',
         });
+        this.taskStore?.save(task.id, task);
+      } else {
+        this.taskStore?.save(task.id, task);
       }
     });
     this.on('task:terminated', (task) => {
@@ -288,6 +301,7 @@ export class TaskOrchestrator extends EventEmitter {
       turnStatus: existing?.turnStatus || null,
     };
     this.tasks.set(task.id, nextTask);
+    this.taskStore?.save(task.id, nextTask);
     this.emit('task:added', nextTask);
     this.emit('task:updated', nextTask);
   }
@@ -376,7 +390,7 @@ export class TaskOrchestrator extends EventEmitter {
       session = this.sessionManager.createSession(sessionId, cliType, {
         command,
         args,
-        cwd: process.cwd(),
+        cwd: task.cwd || process.cwd(),
         env: this.#buildCliEnv(cliType),
       });
       this.sessions.set(sessionId, session);
@@ -431,7 +445,7 @@ export class TaskOrchestrator extends EventEmitter {
 
   #defaultCliArgs(cliType) {
     if (cliType === 'codex') {
-      return `--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=high --no-alt-screen -C ${process.cwd()}`;
+      return `--ask-for-approval never --sandbox danger-full-access -c model_reasoning_effort=high --no-alt-screen`;
     }
     if (cliType === 'claude') {
       return '--dangerously-skip-permissions';
@@ -488,7 +502,7 @@ export class TaskOrchestrator extends EventEmitter {
     const result = await this.codexClient.submitPrompt({
       sessionKey,
       prompt: task.prompt || '',
-      cwd: process.cwd(),
+      cwd: task.cwd || process.cwd(),
       model,
     });
     task.structuredThreadId = result.threadId;
@@ -1135,6 +1149,7 @@ export class TaskOrchestrator extends EventEmitter {
       this.taskBySession.delete(task.localSessionId);
     }
     this.tasks.delete(taskId);
+    this.taskStore?.remove(taskId);
     this.emit('task:evicted', { taskId, reason });
     return true;
   }
