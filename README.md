@@ -1,6 +1,6 @@
 <div align="center">
 
-<h1>openclaw-cli-auto</h1>
+<h1>openclaw-autocli</h1>
 
 **将 AI CLI 工具封装为通用任务调度服务**
 
@@ -18,7 +18,7 @@
 
 ### 项目简介
 
-`openclaw-cli-auto` 是一个后端服务，将外部客户端（如 OpenClaw）与本地 AI CLI 工具（Claude、Gemini、Codex、OpenCode）通过 task/session 编排连接起来。
+`openclaw-autocli` 是一个后端服务，将外部客户端（如 OpenClaw）与本地 AI CLI 工具（Claude、Gemini、Codex、OpenCode）通过 task/session 编排连接起来。
 
 - 接收外部客户端的 task/session 创建请求
 - 管理本地 AI CLI 进程的生命周期
@@ -158,7 +158,7 @@ curl -X DELETE http://127.0.0.1:8700/tasks/<id>
 
 ### Overview
 
-`openclaw-cli-auto` provides a backend HTTP + WebSocket service that:
+`openclaw-autocli` provides a backend HTTP + WebSocket service that:
 
 - Accepts task/session creation requests from external clients (e.g. OpenClaw)
 - Spawns and manages local AI CLI processes (Claude, Gemini, Codex, OpenCode)
